@@ -34,7 +34,29 @@ def sample_motion_model(particles, odom_prev, odom_now, rng):
     and replay it from the particle's own heading. Wrap the yaws. Reference: Probabilistic Robotics,
     table 5.6. Watch out when trans is nearly zero (turning in place) and when driving backward.
     """
-    raise NotImplementedError('sample_motion_model')
+    dx = odom_now[0] - odom_prev[0]
+    dy = odom_now[1] - odom_prev[1]
+    trans = math.hypot(dx, dy)
+    rot1 = 0.0 if trans < 1e-9 else float(wrap(math.atan2(dy, dx) - odom_prev[2]))
+
+    # backward travel is negative translation rather than two half turns
+    if abs(rot1) > math.pi / 2:
+        rot1 = float(wrap(rot1 + math.pi))
+        trans = -trans
+    rot2 = float(wrap(odom_now[2] - odom_prev[2] - rot1))
+
+    a1, a2, a3, a4 = ALPHAS
+    n = len(particles)
+    noisy_rot1 = rot1 + rng.normal(0.0, math.sqrt(a1 * rot1**2 + a2 * trans**2), n)
+    noisy_trans = trans + rng.normal(0.0, math.sqrt(a3 * trans**2 + a4 * (rot1**2 + rot2**2)), n)
+    noisy_rot2 = rot2 + rng.normal(0.0, math.sqrt(a1 * rot2**2 + a2 * trans**2), n)
+
+    heading = particles[:, 2] + noisy_rot1
+    return np.column_stack([
+        particles[:, 0] + noisy_trans * np.cos(heading),
+        particles[:, 1] + noisy_trans * np.sin(heading),
+        wrap(heading + noisy_rot2),
+    ])
 
 
 def scan_log_likelihood(particles, ranges, angles, grid, laser_offset):
@@ -51,7 +73,20 @@ def scan_log_likelihood(particles, ranges, angles, grid, laser_offset):
     where N is the Gaussian density. Sum the logs of the scores over the beams. Endpoints off the map
     should get the lowest score, not the highest. Try to do it without Python loops.
     """
-    raise NotImplementedError('scan_log_likelihood')
+    ranges = np.asarray(ranges, dtype=float)
+    angles = np.asarray(angles, dtype=float)
+
+    c, s = np.cos(particles[:, 2]), np.sin(particles[:, 2])
+    laser_x = particles[:, 0] + c * laser_offset[0] - s * laser_offset[1]
+    laser_y = particles[:, 1] + s * laser_offset[0] + c * laser_offset[1]
+
+    beam_yaw = particles[:, 2, None] + laser_offset[2] + angles[None, :]
+    end_x = laser_x[:, None] + ranges[None, :] * np.cos(beam_yaw)
+    end_y = laser_y[:, None] + ranges[None, :] * np.sin(beam_yaw)
+
+    distance = grid.distance_at(end_x, end_y, outside=np.inf)
+    hit_density = np.exp(-0.5 * (distance / SIGMA_HIT)**2) / (math.sqrt(2 * math.pi) * SIGMA_HIT)
+    return np.log(Z_HIT * hit_density + Z_RAND / MAX_RANGE).sum(axis=1)
 
 
 def low_variance_resample(particles, weights, rng):
@@ -60,13 +95,26 @@ def low_variance_resample(particles, weights, rng):
     Use low-variance (systematic) resampling: one random number r in [0, 1/N), then pointers at
     r, r + 1/N, r + 2/N, ... into the cumulative sum of the weights. Probabilistic Robotics, table 4.4.
     """
-    raise NotImplementedError('low_variance_resample')
+    n = len(particles)
+    cumulative = np.cumsum(weights, dtype=float)
+    cumulative /= cumulative[-1]
+    cumulative[-1] = 1.0  # rounding errors
+
+    pointers = rng.uniform(0.0, 1.0 / n) + np.arange(n) / n
+    indices = np.searchsorted(cumulative, pointers, side='right')
+
+    return particles[indices].copy()
 
 
 def estimate_pose(particles, weights):
     """The weighted mean pose, as a (3,) array. Average the yaws as angles: the mean of 179 degrees
     and -179 degrees is 180, not 0."""
-    raise NotImplementedError('estimate_pose')
+    xy = np.average(particles[:, :2], axis=0, weights=weights)
+
+    yaw = math.atan2(np.dot(weights, np.sin(particles[:, 2])),
+                     np.dot(weights, np.cos(particles[:, 2])))
+
+    return np.array([xy[0], xy[1], float(wrap(yaw))])
 
 
 class ParticleFilter:
